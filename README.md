@@ -19,7 +19,8 @@ ex-param is an automated tool designed for finding reflected parameters for XSS 
 
 1. Clone the repository:
 
-    git clone https://github.com/yourusername/ex-param.git
+    git clone https://github.com/rootDR/ex-param.git
+
     cd ex-param
 
 

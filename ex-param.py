@@ -9,6 +9,7 @@ from tqdm import tqdm
 # Reflected Parameter payload marker
 REFLECTION_MARKER = "reflect_test_parameter"
 
+
 def print_banner():
     """Print the banner for the tool."""
     banner = r"""
@@ -20,12 +21,12 @@ def print_banner():
 (__________/' \_     /(___,/'  (___,/(__/'        (___,/(__/'    /'    /(__ 
                    /'                                                       
                  /'                                                         
-               /'                                                                                          
 
     Automated Reflected Parameter Finder Tool
-    Author: rootdr | Twitter: @R00TDR , Tellegram: https://t.me/RootDr
+    Author: rootdr | Twitter: @R00TDR , Telegram: https://t.me/RootDr
     """
     print(colored(banner, "red"))
+
 
 def fetch_url(target):
     """Send a GET request to fetch a URL's content."""
@@ -35,12 +36,21 @@ def fetch_url(target):
     except requests.exceptions.RequestException:
         return None
 
+
+def is_same_domain(url, target_domain):
+    """Check if the URL belongs to the target domain or its subdomains."""
+    parsed_url = urlparse(url)
+    return parsed_url.netloc.endswith(target_domain)
+
+
 def crawl_domain(target):
     """Crawl the domain and extract unique pages and their GET parameters."""
     print(colored("[*] Crawling the domain for pages and parameters...", "yellow"))
     crawled_urls = set()
     parameters = set()
     to_visit = {target}
+
+    target_domain = urlparse(target).netloc
 
     try:
         while to_visit:
@@ -57,26 +67,23 @@ def crawl_domain(target):
             soup = BeautifulSoup(response, "html.parser")
             for link in soup.find_all("a", href=True):
                 full_url = urljoin(url, link["href"])
-                parsed = urlparse(full_url)
-
-                # Keep links within the same domain
-                if parsed.netloc == urlparse(target).netloc:
+                if is_same_domain(full_url, target_domain):
                     to_visit.add(full_url)
 
                 # Extract GET parameters
+                parsed = urlparse(full_url)
                 query_params = parse_qs(parsed.query)
                 for param in query_params.keys():
                     parameters.add((full_url.split("?")[0], param))  # (base_url, parameter)
 
     except KeyboardInterrupt:
         print(colored("[!] Crawling stopped by user.", "red"))
-    
+
     return crawled_urls, parameters
 
+
 def check_reflected_parameter(base_url, param):
-    """
-    Test if a parameter reflects its input by using a simple payload.
-    """
+    """Test if a parameter reflects its input by using a simple payload."""
     test_value = REFLECTION_MARKER
     query = {param: test_value}
     try:
@@ -86,6 +93,7 @@ def check_reflected_parameter(base_url, param):
     except requests.exceptions.RequestException:
         pass  # Ignore request errors
     return None
+
 
 def main():
     # Print banner
@@ -129,6 +137,7 @@ def main():
             print(colored(f"[Reflected] {result}", "green"))
     else:
         print(colored("\n[-] No reflected parameters found.", "red"))
+
 
 if __name__ == "__main__":
     main()

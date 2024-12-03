@@ -5,6 +5,7 @@ from urllib.parse import urlparse, urljoin, parse_qs
 from termcolor import colored
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+import os
 
 # Reflected Parameter payload marker
 REFLECTION_MARKER = "reflect_test_parameter"
@@ -37,13 +38,13 @@ def fetch_url(target):
         return None
 
 
-def is_same_domain(url, target_domain):
-    """Check if the URL belongs to the target domain or its subdomains."""
+def is_internal_url(url, target_domain):
+    """Check if the URL is internal (belongs to the same domain)."""
     parsed_url = urlparse(url)
     return parsed_url.netloc.endswith(target_domain)
 
 
-def crawl_domain(target):
+def crawl_domain(target, crawl_subdomains=False):
     """Crawl the domain and extract unique pages and their GET parameters."""
     print(colored("[*] Crawling the domain for pages and parameters...", "yellow"))
     crawled_urls = set()
@@ -51,6 +52,10 @@ def crawl_domain(target):
     to_visit = {target}
 
     target_domain = urlparse(target).netloc
+
+    # Create target folder for saving pages and results
+    target_folder = target_domain.replace(".", "_")
+    os.makedirs(target_folder, exist_ok=True)
 
     try:
         while to_visit:
@@ -63,11 +68,18 @@ def crawl_domain(target):
             if not response:
                 continue
 
+            # Save crawled page to file
+            page_filename = os.path.join(target_folder, urlparse(url).path.replace("/", "_") or "index.html")
+            with open(page_filename, "w", encoding="utf-8") as page_file:
+                page_file.write(response)
+
             # Parse the page and extract links
             soup = BeautifulSoup(response, "html.parser")
             for link in soup.find_all("a", href=True):
                 full_url = urljoin(url, link["href"])
-                if is_same_domain(full_url, target_domain):
+
+                # Only crawl internal URLs, avoid subdomains unless -s is used
+                if crawl_subdomains or is_internal_url(full_url, target_domain):
                     to_visit.add(full_url)
 
                 # Extract GET parameters
@@ -79,7 +91,7 @@ def crawl_domain(target):
     except KeyboardInterrupt:
         print(colored("[!] Crawling stopped by user.", "red"))
 
-    return crawled_urls, parameters
+    return crawled_urls, parameters, target_folder
 
 
 def check_reflected_parameter(base_url, param):
@@ -102,16 +114,18 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description="Automated Reflected Parameter Finder Tool")
     parser.add_argument("-t", "--target", required=True, help="Target domain to crawl (e.g., http://example.com)")
+    parser.add_argument("-s", "--subdomains", action="store_true", help="Crawl subdomains as well")
     args = parser.parse_args()
 
     target = args.target
+    crawl_subdomains = args.subdomains
 
     if not target.startswith("http://") and not target.startswith("https://"):
         print(colored("[!] Target URL must start with http:// or https://", "red"))
         return
 
     # Crawl the domain and extract parameters
-    crawled_urls, parameters = crawl_domain(target)
+    crawled_urls, parameters, target_folder = crawl_domain(target, crawl_subdomains)
     print(colored(f"[*] Crawled {len(crawled_urls)} unique pages.", "yellow"))
     print(colored(f"[*] Found {len(parameters)} unique parameters.", "yellow"))
 
@@ -135,6 +149,9 @@ def main():
         print(colored("\n[+] Reflected Parameters Found:", "green"))
         for result in reflected_results:
             print(colored(f"[Reflected] {result}", "green"))
+            # Save reflected results to a file
+            with open(os.path.join(target_folder, "reflected_parameters.txt"), "a", encoding="utf-8") as result_file:
+                result_file.write(result + "\n")
     else:
         print(colored("\n[-] No reflected parameters found.", "red"))
 

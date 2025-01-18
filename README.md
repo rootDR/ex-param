@@ -13,10 +13,6 @@ A fast and efficient tool to identify reflected parameters on websites, potentia
 - **Save Crawled Data**: Saves crawled URLs and reflected parameters in a structured folder for later review.
 - **Multithreaded Performance**: Optimized crawling and testing with multithreading to maximize speed.
 
-# Installation
-Clone the repository:
-`git clone https://github.com/rootDR/ex-param.git`
-
 ## Installation
 
 ### 1. Clone the Repository

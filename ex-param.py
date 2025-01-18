@@ -1,66 +1,77 @@
 import argparse
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin, parse_qs
+from urllib.parse import urlparse, urljoin, parse_qs, unquote
 from termcolor import colored
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import os
+import re
+import time
+import json
+import csv
+import logging
+import warnings
+from bs4 import MarkupResemblesLocatorWarning
 
-# Reflected Parameter payload marker
-REFLECTION_MARKER = "reflect_test_parameter"
+# Suppress BeautifulSoup warning
+warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
+
+# Default payload for reflection testing
+REFLECTION_MARKER = "reflected-parameter-test"
+
+# Configure logging
+logging.basicConfig(filename="reflected_xss.log", level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
 def print_banner():
     """Print the banner for the tool."""
     banner = r"""
-                                                                  
-                                                              
-    ____  .    ,          ____     ____      ____     ____     ,__________ 
-   /'    )  \  /         /'    )--/'    )   )'    )--/'    )   /'    )     )
- /(___,/'    \'        /'    /' /'    /'  /'       /'    /'  /'    /'    /' 
-(__________/' \_     /(___,/'  (___,/(__/'        (___,/(__/'    /'    /(__ 
-                   /'                                                       
-                 /'                                                         
-
+    ███████╗██╗  ██╗   ██████╗ ██████╗  █████╗ ███╗   ███╗
+    ██╔════╝╚██╗██╔╝   ██╔══██╗██╔══██╗██╔══██╗████╗ ████║
+    █████╗   ╚███╔╝    ██████╔╝██████╔╝███████║██╔████╔██║
+    ██╔══╝   ██╔██╗    ██╔═══╝ ██╔══██╗██╔══██║██║╚██╔╝██║
+    ███████╗██╔╝ ██╗██╗██║     ██║  ██║██║  ██║██║ ╚═╝ ██║
+    ╚══════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝
     Automated Reflected Parameter Finder Tool
-    Author: rootdr | Twitter: @R00TDR , Telegram: https://t.me/RootDr
+    Author: rootdr | Twitter: @R00TDR | Telegram: https://t.me/RootDr
     """
-    print(colored(banner, "red"))
+    print(colored(banner, "cyan"))
 
 
 def fetch_url(target):
     """Send a GET request to fetch a URL's content."""
     try:
-        response = requests.get(target, timeout=5)
+        response = requests.get(target, timeout=10)  # Increased timeout
         return response.text
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to fetch {target}: {e}")
         return None
 
 
 def is_internal_url(url, target_domain):
-    """Check if the URL is internal (belongs to the same domain)."""
+    """Check if the URL is internal (belongs to the same domain or its subdomains)."""
     parsed_url = urlparse(url)
-    return parsed_url.netloc.endswith(target_domain)
+    return parsed_url.netloc == target_domain or parsed_url.netloc.endswith(f".{target_domain}")
 
 
-def crawl_domain(target, crawl_subdomains=False):
+def crawl_domain(target, crawl_subdomains=False, depth=3):
     """Crawl the domain and extract unique pages and their GET parameters."""
     print(colored("[*] Crawling the domain for pages and parameters...", "yellow"))
     crawled_urls = set()
     parameters = set()
-    to_visit = {target}
+    to_visit = [(target, 0)]  # (url, current_depth)
 
     target_domain = urlparse(target).netloc
 
-    # Create target folder for saving pages and results
+    # Create target folder for saving results
     target_folder = target_domain.replace(".", "_")
     os.makedirs(target_folder, exist_ok=True)
 
     try:
         while to_visit:
-            url = to_visit.pop()
-            if url in crawled_urls:
+            url, current_depth = to_visit.pop()
+            if url in crawled_urls or current_depth > depth:
                 continue
 
             crawled_urls.add(url)
@@ -68,43 +79,92 @@ def crawl_domain(target, crawl_subdomains=False):
             if not response:
                 continue
 
-            # Save crawled page to file
-            page_filename = os.path.join(target_folder, urlparse(url).path.replace("/", "_") or "index.html")
-            with open(page_filename, "w", encoding="utf-8") as page_file:
-                page_file.write(response)
-
             # Parse the page and extract links
             soup = BeautifulSoup(response, "html.parser")
             for link in soup.find_all("a", href=True):
-                full_url = urljoin(url, link["href"])
+                full_url = urljoin(url, link["href"].lstrip("/"))
 
                 # Only crawl internal URLs, avoid subdomains unless -s is used
                 if crawl_subdomains or is_internal_url(full_url, target_domain):
-                    to_visit.add(full_url)
+                    to_visit.append((full_url, current_depth + 1))
 
                 # Extract GET parameters
                 parsed = urlparse(full_url)
-                query_params = parse_qs(parsed.query)
+                query_params = {k: v for k, v in parse_qs(parsed.query).items() if any(v)}
                 for param in query_params.keys():
                     parameters.add((full_url.split("?")[0], param))  # (base_url, parameter)
 
     except KeyboardInterrupt:
         print(colored("[!] Crawling stopped by user.", "red"))
+        return crawled_urls, parameters, target_folder
 
     return crawled_urls, parameters, target_folder
 
 
-def check_reflected_parameter(base_url, param):
+def check_reflected_parameter(base_url, param, payload=None):
     """Test if a parameter reflects its input by using a simple payload."""
-    test_value = REFLECTION_MARKER
+    test_value = payload if payload else REFLECTION_MARKER
     query = {param: test_value}
     try:
-        response = requests.get(base_url, params=query, timeout=5)
-        if test_value in response.text:
-            return f"{base_url}?{param}={test_value}"  # Found reflection
-    except requests.exceptions.RequestException:
-        pass  # Ignore request errors
+        response = requests.get(base_url, params=query, timeout=10)  # Increased timeout
+        response_text = unquote(response.text)
+
+        # Check if the payload is reflected in the response
+        if test_value in response_text:
+            # Use BeautifulSoup to check if the reflection is in a dangerous context
+            soup = BeautifulSoup(response_text, "html.parser")
+
+            # Check if the payload is reflected in HTML attributes
+            for tag in soup.find_all():
+                for attr in tag.attrs:
+                    if isinstance(tag[attr], list):
+                        for value in tag[attr]:
+                            if test_value in value:
+                                return f"{base_url}?{param}={test_value}"  # Found reflection in attribute
+                    elif test_value in tag[attr]:
+                        return f"{base_url}?{param}={test_value}"  # Found reflection in attribute
+
+            # Check if the payload is reflected in JavaScript or other dangerous contexts
+            for script in soup.find_all("script"):
+                if test_value in script.string:
+                    return f"{base_url}?{param}={test_value}"  # Found reflection in script
+
+            # Check if the payload is reflected in plain text (less dangerous but still relevant)
+            for text in soup.find_all(string=lambda x: test_value in x):
+                return f"{base_url}?{param}={test_value}"  # Found reflection in text
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to check {base_url}?{param}={test_value}: {e}")
     return None
+
+
+def save_results(data, output_format="txt", filename="results", target_folder="results"):
+    """Save results in the specified format (txt, json, csv)."""
+    os.makedirs(target_folder, exist_ok=True)
+    filepath = os.path.join(target_folder, f"{filename}.{output_format}")
+
+    if output_format == "json":
+        with open(filepath, "w") as f:
+            json.dump(list(data), f, indent=4)
+    elif output_format == "csv":
+        with open(filepath, "w", newline="") as f:
+            writer = csv.writer(f)
+            if filename == "crawledpages":
+                writer.writerow(["URL"])
+                for url in data:
+                    writer.writerow([url])
+            else:
+                writer.writerow(["URL", "Parameter"])
+                for result in data:
+                    writer.writerow(result.split("?"))
+    else:
+        with open(filepath, "w") as f:
+            if filename == "crawledpages":
+                for url in data:
+                    f.write(url + "\n")
+            else:
+                for result in data:
+                    f.write(result + "\n")
 
 
 def main():
@@ -115,43 +175,66 @@ def main():
     parser = argparse.ArgumentParser(description="Automated Reflected Parameter Finder Tool")
     parser.add_argument("-t", "--target", required=True, help="Target domain to crawl (e.g., http://example.com)")
     parser.add_argument("-s", "--subdomains", action="store_true", help="Crawl subdomains as well")
+    parser.add_argument("-d", "--depth", type=int, default=3, help="Maximum crawling depth")
+    parser.add_argument("-p", "--payload", help="Custom payload to test for reflection")
+    parser.add_argument("-f", "--format", choices=["txt", "json", "csv"], default="txt", help="Output format for results")
+    parser.add_argument("--delay", type=float, default=0.5, help="Delay between requests (in seconds)")  # Reduced delay
+    parser.add_argument("--blacklist", help="Comma-separated list of parameters to ignore")
+    parser.add_argument("--whitelist", help="Comma-separated list of parameters to test")
     args = parser.parse_args()
 
     target = args.target
     crawl_subdomains = args.subdomains
+    depth = args.depth
+    payload = args.payload
+    output_format = args.format
+    delay = args.delay
+    blacklist = args.blacklist.split(",") if args.blacklist else []
+    whitelist = args.whitelist.split(",") if args.whitelist else []
 
     if not target.startswith("http://") and not target.startswith("https://"):
         print(colored("[!] Target URL must start with http:// or https://", "red"))
         return
 
     # Crawl the domain and extract parameters
-    crawled_urls, parameters, target_folder = crawl_domain(target, crawl_subdomains)
+    crawled_urls, parameters, target_folder = crawl_domain(target, crawl_subdomains, depth)
     print(colored(f"[*] Crawled {len(crawled_urls)} unique pages.", "yellow"))
     print(colored(f"[*] Found {len(parameters)} unique parameters.", "yellow"))
+
+    # Save crawled URLs to a file
+    save_results(crawled_urls, output_format, "crawledpages", target_folder)
+    print(colored(f"[*] Crawled URLs saved to {target_folder}/crawledpages.{output_format}", "yellow"))
+
+    # Filter parameters based on blacklist/whitelist
+    if blacklist or whitelist:
+        parameters = {(url, param) for url, param in parameters if (not whitelist or param in whitelist) and param not in blacklist}
+        print(colored(f"[*] Filtered to {len(parameters)} parameters.", "yellow"))
 
     # Check reflected parameters
     print(colored("[*] Testing for reflected parameters...", "yellow"))
     reflected_results = []
     with tqdm(total=len(parameters), desc="Testing Parameters", unit="param") as progress_bar:
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        with ThreadPoolExecutor(max_workers=20) as executor:  # Increased threads
             futures = [
-                executor.submit(check_reflected_parameter, base_url, param)
+                executor.submit(check_reflected_parameter, base_url, param, payload)
                 for base_url, param in parameters
             ]
             for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        reflected_results.append(result)
+                except Exception as e:
+                    logging.error(f"Error processing future: {e}")
                 progress_bar.update(1)
-                result = future.result()
-                if result:
-                    reflected_results.append(result)
+                time.sleep(delay)  # Add a delay between requests
 
     # Output results
     if reflected_results:
         print(colored("\n[+] Reflected Parameters Found:", "green"))
         for result in reflected_results:
             print(colored(f"[Reflected] {result}", "green"))
-            # Save reflected results to a file
-            with open(os.path.join(target_folder, "reflected_parameters.txt"), "a", encoding="utf-8") as result_file:
-                result_file.write(result + "\n")
+        save_results(reflected_results, output_format, "reflected_parameters", target_folder)
     else:
         print(colored("\n[-] No reflected parameters found.", "red"))
 

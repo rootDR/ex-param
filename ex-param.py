@@ -23,7 +23,6 @@ REFLECTION_MARKER = "reflected-parameter-test"
 # Configure logging
 logging.basicConfig(filename="reflected_xss.log", level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-
 def print_banner():
     """Print the banner for the tool."""
     banner = r"""
@@ -38,7 +37,6 @@ def print_banner():
     """
     print(colored(banner, "cyan"))
 
-
 def fetch_url(target):
     """Send a GET request to fetch a URL's content."""
     try:
@@ -48,15 +46,23 @@ def fetch_url(target):
         logging.error(f"Failed to fetch {target}: {e}")
         return None
 
-
-def is_internal_url(url, target_domain):
-    """Check if the URL is internal (belongs to the same domain or its subdomains)."""
+def is_internal_link(url, target_domain, crawl_subdomains):
+    """
+    Check if the URL is internal.
+    If crawl_subdomains is True, allow subdomains.
+    Otherwise, only allow the exact target domain.
+    """
     parsed_url = urlparse(url)
-    return parsed_url.netloc == target_domain or parsed_url.netloc.endswith(f".{target_domain}")
-
+    if crawl_subdomains:
+        return parsed_url.netloc == target_domain or parsed_url.netloc.endswith(f".{target_domain}")
+    else:
+        return parsed_url.netloc == target_domain
 
 def crawl_domain(target, crawl_subdomains=False, depth=3):
-    """Crawl the domain and extract unique pages and their GET parameters."""
+    """
+    Crawl the domain and extract unique pages and their GET parameters.
+    Only URLs that pass the internal check are crawled and have their parameters extracted.
+    """
     print(colored("[*] Crawling the domain for pages and parameters...", "yellow"))
     crawled_urls = set()
     parameters = set()
@@ -79,27 +85,23 @@ def crawl_domain(target, crawl_subdomains=False, depth=3):
             if not response:
                 continue
 
-            # Parse the page and extract links
+            # Parse the page and extract links only if they are internal
             soup = BeautifulSoup(response, "html.parser")
             for link in soup.find_all("a", href=True):
                 full_url = urljoin(url, link["href"].lstrip("/"))
 
-                # Only crawl internal URLs, avoid subdomains unless -s is used
-                if crawl_subdomains or is_internal_url(full_url, target_domain):
+                if is_internal_link(full_url, target_domain, crawl_subdomains):
                     to_visit.append((full_url, current_depth + 1))
-
-                # Extract GET parameters
-                parsed = urlparse(full_url)
-                query_params = {k: v for k, v in parse_qs(parsed.query).items() if any(v)}
-                for param in query_params.keys():
-                    parameters.add((full_url.split("?")[0], param))  # (base_url, parameter)
-
+                    # Extract GET parameters only from in-scope URLs
+                    parsed = urlparse(full_url)
+                    query_params = {k: v for k, v in parse_qs(parsed.query).items() if any(v)}
+                    for param in query_params.keys():
+                        parameters.add((full_url.split("?")[0], param))
     except KeyboardInterrupt:
         print(colored("[!] Crawling stopped by user.", "red"))
         return crawled_urls, parameters, target_folder
 
     return crawled_urls, parameters, target_folder
-
 
 def check_reflected_parameter(base_url, param, payload=None):
     """Test if a parameter reflects its input by using a simple payload."""
@@ -126,7 +128,7 @@ def check_reflected_parameter(base_url, param, payload=None):
 
             # Check if the payload is reflected in JavaScript or other dangerous contexts
             for script in soup.find_all("script"):
-                if test_value in script.string:
+                if script.string and test_value in script.string:
                     return f"{base_url}?{param}={test_value}"  # Found reflection in script
 
             # Check if the payload is reflected in plain text (less dangerous but still relevant)
@@ -136,7 +138,6 @@ def check_reflected_parameter(base_url, param, payload=None):
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to check {base_url}?{param}={test_value}: {e}")
     return None
-
 
 def save_results(data, output_format="txt", filename="results", target_folder="results"):
     """Save results in the specified format (txt, json, csv)."""
@@ -165,7 +166,6 @@ def save_results(data, output_format="txt", filename="results", target_folder="r
             else:
                 for result in data:
                     f.write(result + "\n")
-
 
 def main():
     # Print banner
@@ -237,7 +237,6 @@ def main():
         save_results(reflected_results, output_format, "reflected_parameters", target_folder)
     else:
         print(colored("\n[-] No reflected parameters found.", "red"))
-
 
 if __name__ == "__main__":
     main()
